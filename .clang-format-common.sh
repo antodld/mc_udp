@@ -11,5 +11,5 @@ else
 fi
 
 # Find all source files in the project minus those that are auto-generated or we do not maintain
-src_files=`find include src -name '*.cpp' -or -name '*.h' -or -name '*.hpp'`
+src_files=`find include src plugins -name '*.cpp' -or -name '*.h' -or -name '*.hpp'`
 
