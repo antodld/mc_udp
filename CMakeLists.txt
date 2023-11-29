@@ -19,8 +19,12 @@ option(BUILD_OPENRTM_SERVER "Build OpenRTM server component" ON)
 option(BUILD_LEGACY_OPENRTM_SERVER "Build OpenRTM server with c++0x" OFF)
 option(BUILD_DUMMY_CLIENT "Build dummy client" OFF)
 option(BUILD_DUMMY_SERVER "Build dummy server" OFF)
+option(BUILD_UDP_PLUGIN "Build UDP plugin" OFF)
 
 add_subdirectory(src)
+if(BUILD_UDP_PLUGIN)
+  add_subdirectory(plugins/UDPPlugin)
+endif()
 
 if(PYTHON_BINDING)
   add_subdirectory(binding/python)

@@ -1,0 +1,5 @@
+# Global configuration options for UDPPlugin
+# These are the default values used by the plugin, they may be overriden at controller's level,
+# See https://jrl-umi3218.github.io/mc_rtc/tutorials/usage/global-plugins.html for more details
+
+---
