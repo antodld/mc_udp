@@ -31,9 +31,14 @@ void UDPPlugin::init(mc_control::MCGlobalController & gc, const mc_rtc::Configur
   {
     udpRobotControls_.emplace_back(new UDPRobotControl(gc, robotName, robotUDPConfig));
   }
+  reset(gc);
 }
 
-void UDPPlugin::reset(mc_control::MCGlobalController & controller) {}
+void UDPPlugin::reset(mc_control::MCGlobalController & controller)
+{
+  auto & ctl = controller.controller();
+  ctl.datastore().make<bool>("UDPPlugin", true);
+}
 
 void UDPPlugin::before(mc_control::MCGlobalController & gc)
 {

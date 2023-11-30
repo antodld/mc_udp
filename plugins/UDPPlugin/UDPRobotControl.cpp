@@ -85,19 +85,18 @@ UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
       // mc_rtc::log::info("Trying to receive sensors");
       if(sensorsClient.recv())
       {
-        mc_rtc::log::info("Received sensors");
         auto & sensorsMessages = sensorsClient.sensors().messages;
         if(!sensorsMessages.count(robotName))
         {
           mc_rtc::log::error("[{}] Server is providing sensors message for:", name_);
-          for(const auto & m : sensorsClient.sensors().messages)
+          for(const auto & m : sensorsMessages)
           {
             mc_rtc::log::error("- {}", m.first);
           }
           mc_rtc::log::error_and_throw<std::runtime_error>(
               "[{}] Server is not providing sensors message for robot ({})", name_, robotName);
         }
-        const auto & sensors = sensorsClient.sensors().messages.at(robotName);
+        const auto & sensors = sensorsMessages.at(robotName);
         {
           std::lock_guard<std::mutex> sensorsLock(sensorsMutex_);
           sensors_ = sensors;
@@ -105,7 +104,7 @@ UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
         }
         if(!clientsInitialized)
         {
-          mc_rtc::log::info("Waiting for controller to finish initialization");
+          mc_rtc::log::info("[{}] Waiting for controller initialization", name_);
           std::unique_lock<std::mutex> lock(udpInitMutex_);
           udpInitCV_.wait(lock, [this, &sensorsClient, &controlClient]() {
             if(controllerInit_)
@@ -116,7 +115,7 @@ UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
               {
                 controlClient.init();
               }
-              mc_rtc::log::info("Clients initialized");
+              mc_rtc::log::info("[{}] Clients initialized, start receiving data", name_);
             }
             return controllerInit_;
           });
@@ -127,7 +126,6 @@ UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
       {
         continue;
       }
-      mc_rtc::log::info("Waiting for command to send");
       std::unique_lock<std::mutex> lock(sendControlMutex_);
       sendControlCV_.wait(lock, [this]() -> bool { return sendControl_; });
       {
@@ -136,7 +134,6 @@ UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
       }
       controlClient.send();
       sendControl_ = false;
-      mc_rtc::log::info("Sent command");
     }
   });
 }
@@ -149,18 +146,15 @@ UDPRobotControl::~UDPRobotControl()
 
 void UDPRobotControl::updateSensors()
 {
-  auto sensors = mc_udp::RobotSensors{};
-  if(gotSensors_)
+  if(!gotSensors_) return;
+  gotSensors_ = false;
+
+  auto & ctl = controller_.controller();
+
+  auto sensors = mc_udp::RobotSensors();
   {
     std::lock_guard<std::mutex> sensorsLock(sensorsMutex_);
     sensors = sensors_;
-    mc_rtc::log::info("[{}] Got encoders {}", name_, mc_rtc::io::to_string(sensors.encoders));
-    gotSensors_ = false;
-  }
-  else
-  {
-    /* mc_rtc::log::warning("[{}] Did not get sensors", name_); */
-    return;
   }
   Eigen::Vector3d rpy;
   rpy << sensors.orientation[0], sensors.orientation[1], sensors.orientation[2];
@@ -195,13 +189,33 @@ void UDPRobotControl::updateSensors()
 
   if(!controllerInit_)
   {
-    mc_rtc::log::info("Initializing controller");
-    // auto init_start = clock::now();
-    // controller_.init(qIn);
-    // controller_.running = true;
-    // auto init_end = clock::now();
-    // duration_ms init_dt = init_end - init_start;
-    auto & robot = controller_.robot(robotName_);
+    mc_rtc::log::info("[{}] Initializing controller", name_);
+    auto & robot = ctl.robot(robotName_);
+    auto & q = robot.mbc().q;
+    for(size_t i = 0; i < qIn.size(); i++)
+    {
+      auto jIdx = robot.jointIndexInMBC(i);
+      if(jIdx != -1 && q[jIdx].size() == 1)
+      {
+        q[jIdx][0] = qIn[i];
+      }
+    }
+    mc_rtc::log::warning("[{}] Resetting robot to initial position {}", name_, mc_rtc::io::to_string(qIn));
+    robot.forwardKinematics();
+    robot.forwardVelocity();
+    robot.forwardAcceleration();
+    /**
+    * As we have no guarantee that the robot is available before the controller has already been initialized, we
+    * provide a way to call a user-defined reset function that is called now that the robot is fully initialized.
+    * The user is expected to handle resetting the tasks according to the current robot state.
+    *
+    * Note that in case the robot starts in its halfsitting stance, this is not needed as the controller's robot state and
+    * the real robot match.
+     */
+    if(ctl.datastore().has("UDPPlugin::" + robotName_ + "::reset"))
+    {
+      ctl.datastore().call<void>("UDPPlugin::" + robotName_ + "::reset");
+    }
     const auto & rjo = robot.module().ref_joint_order();
     auto & cc = controlData_; // no need for lock here as we won't be trying to send control data yet
     auto & qOut = cc.encoders;
