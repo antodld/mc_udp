@@ -25,11 +25,12 @@ UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
     const auto & ignoredVelocityValues = ignoredJointsConfig.velocities;
     std::map<size_t, double> ignoredJoints;
     std::map<size_t, double> ignoredVelocities;
+    auto & robot = controller_.robot(robotName_);
     for(const auto & jN : joints)
     {
-      if(controller_.robot().hasJoint(jN))
+      if(robot.hasJoint(jN))
       {
-        const auto & rjo = controller_.robot().refJointOrder();
+        const auto & rjo = robot.refJointOrder();
         const auto idx = std::distance(rjo.begin(), std::find(rjo.begin(), rjo.end(), jN));
         double qInit = 0;
         double alphaInit = 0;
@@ -41,7 +42,7 @@ UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
         else
         {
           // Use halfsitting configuration
-          qInit = controller_.robot().stance().at(jN)[0];
+          qInit = robot.stance().at(jN)[0];
         }
         ignoredJoints[idx] = qInit;
 
@@ -55,7 +56,7 @@ UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
       }
       else
       {
-        mc_rtc::log::warning("[UDP] Ignored joint {} is not present in robot ", jN, controller_.robot().name());
+        mc_rtc::log::warning("[UDP] Ignored joint {} is not present in robot ", jN, robot.name());
       }
     }
   };
@@ -65,6 +66,7 @@ UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
     const auto & host = config_.host;
     const auto & port = config_.port;
     const auto & singleClient = config_.singleClient;
+    bool clientsInitialized = false;
 
     mc_udp::Client sensorsClient(host, port);
     mc_rtc::log::info("Connecting UDP sensors client to {}:{}", host, port);
@@ -80,8 +82,10 @@ UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
     std::vector<double> alphaIn;
     while(run_)
     {
+      // mc_rtc::log::info("Trying to receive sensors");
       if(sensorsClient.recv())
       {
+        mc_rtc::log::info("Received sensors");
         auto & sensorsMessages = sensorsClient.sensors().messages;
         if(!sensorsMessages.count(robotName))
         {
@@ -99,24 +103,40 @@ UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
           sensors_ = sensors;
           gotSensors_ = true;
         }
-        if(!controllerInit_)
+        if(!clientsInitialized)
         {
+          mc_rtc::log::info("Waiting for controller to finish initialization");
           std::unique_lock<std::mutex> lock(udpInitMutex_);
-          udpInitCV_.wait(lock, [this]() {
+          udpInitCV_.wait(lock, [this, &sensorsClient, &controlClient]() {
             if(controllerInit_)
             {
-              mc_rtc::log::info("READY");
+              // Controller has now been initialized, we are ready to receive more data
+              sensorsClient.init();
+              if(!config_.singleClient)
+              {
+                controlClient.init();
+              }
+              mc_rtc::log::info("Clients initialized");
             }
             return controllerInit_;
           });
-        }
-        // Controller has now been initialized, we are ready to receive more data
-        sensorsClient.init();
-        if(!config_.singleClient)
-        {
-          controlClient.init();
+          clientsInitialized = true;
         }
       }
+      if(!controllerInit_)
+      {
+        continue;
+      }
+      mc_rtc::log::info("Waiting for command to send");
+      std::unique_lock<std::mutex> lock(sendControlMutex_);
+      sendControlCV_.wait(lock, [this]() -> bool { return sendControl_; });
+      {
+        std::lock_guard<std::mutex> controlLock(controlMutex_);
+        controlClient.control().messages[robotName] = controlData_;
+      }
+      controlClient.send();
+      sendControl_ = false;
+      mc_rtc::log::info("Sent command");
     }
   });
 }
@@ -176,31 +196,25 @@ void UDPRobotControl::updateSensors()
   if(!controllerInit_)
   {
     mc_rtc::log::info("Initializing controller");
-    auto init_start = clock::now();
-    controller_.init(qIn);
-    controller_.running = true;
-    auto init_end = clock::now();
-    duration_ms init_dt = init_end - init_start;
-    for(const auto & robot : controller_.controller().robots())
+    // auto init_start = clock::now();
+    // controller_.init(qIn);
+    // controller_.running = true;
+    // auto init_end = clock::now();
+    // duration_ms init_dt = init_end - init_start;
+    auto & robot = controller_.robot(robotName_);
+    const auto & rjo = robot.module().ref_joint_order();
+    auto & cc = controlData_; // no need for lock here as we won't be trying to send control data yet
+    auto & qOut = cc.encoders;
+    auto & alphaOut = cc.encoderVelocities;
+    if(qOut.size() != rjo.size())
     {
-      const auto & rjo = robot.module().ref_joint_order();
-      if(rjo.size() == 0)
-      {
-        continue;
-      }
-      auto & cc = control_;
-      auto & qOut = cc.encoders;
-      auto & alphaOut = cc.encoderVelocities;
-      if(qOut.size() != rjo.size())
-      {
-        qOut.resize(rjo.size());
-      }
-      if(config_.withEncoderVelocities && alphaOut.size() != rjo.size())
-      {
-        alphaOut.resize(rjo.size());
-      }
+      qOut.resize(rjo.size());
     }
-    mc_rtc::log::info("[MCUDPControl] Init duration {}", init_dt.count());
+    if(config_.withEncoderVelocities && alphaOut.size() != rjo.size())
+    {
+      alphaOut.resize(rjo.size());
+    }
+    // mc_rtc::log::info("[MCUDPControl] Init duration {}", init_dt.count());
     controllerInit_ = true;
     udpInitCV_.notify_all();
   }
@@ -208,7 +222,55 @@ void UDPRobotControl::updateSensors()
 
 void UDPRobotControl::updateControl()
 {
+  if(!controllerInit_) return;
   // TODO update control
+  //
+  // if(prev_id + 1 != sc.id)
+  // {
+  //   mc_rtc::log::warning("[MCUDPControl] Missed one or more sensors reading (previous id: {}, current id: {})",
+  //                        prev_id, sc.id);
+  // }
+  auto & ctl = controller_.controller();
+  auto & robot = ctl.outputRobot(robotName_);
+  const auto & rjo = robot.module().ref_joint_order();
+  const auto & mbc = robot.mbc();
+  std::lock_guard<std::mutex> lock(controlMutex_);
+  auto & cc = controlData_;
+  auto & qOut = cc.encoders;
+  auto & alphaOut = cc.encoderVelocities;
+  for(size_t i = 0; i < rjo.size(); ++i)
+  {
+    const auto & jN = rjo[i];
+    if(robot.hasJoint(jN))
+    {
+      auto jIndex = robot.jointIndexByName(jN);
+      if(mbc.q[jIndex].size() == 1)
+      {
+        auto jIdx = robot.jointIndexByName(jN);
+        qOut[i] = mbc.q[jIdx][0];
+        if(config_.withEncoderVelocities)
+        {
+          alphaOut[i] = mbc.alpha[jIdx][0];
+        }
+      }
+    }
+  }
+
+  // Ignore QP output for ignored joints
+  for(const auto & j : ignoredJoints)
+  {
+    qOut[j.first] = j.second;
+  }
+  if(config_.withEncoderVelocities)
+  {
+    for(const auto & j : ignoredVelocities)
+    {
+      alphaOut[j.first] = j.second;
+    }
+  }
+  // cc.id = sc.id;
+  sendControl_ = true;
+  sendControlCV_.notify_all();
 }
 
 } // namespace mc_plugin

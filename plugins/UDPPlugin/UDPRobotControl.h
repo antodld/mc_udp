@@ -3,6 +3,7 @@
 #include <mc_control/mc_global_controller.h>
 #include <mc_rtc/logging.h>
 #include <mc_udp/client/Client.h>
+#include <mc_udp/data/RobotControl.h>
 #include <atomic>
 #include <condition_variable>
 #include <thread>
@@ -62,11 +63,15 @@ protected:
   mc_udp::RobotSensors sensors_; //< Latest received sensors data
   std::atomic<bool> gotSensors_{false};
   std::mutex sensorsMutex_;
-  mc_udp::RobotControl control_; //< Latest control data to send
+  mc_udp::RobotControl controlData_; //< Latest control data to send
   std::mutex controlMutex_;
   std::thread udpThread_;
   std::condition_variable udpInitCV_;
   std::mutex udpInitMutex_;
   std::atomic<bool> run_{true};
+
+  std::mutex sendControlMutex_;
+  std::atomic<bool> sendControl_{false};
+  std::condition_variable sendControlCV_;
 };
 } // namespace mc_plugin
