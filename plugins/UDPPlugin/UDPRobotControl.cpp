@@ -80,6 +80,7 @@ UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
 
     std::vector<double> qIn;
     std::vector<double> alphaIn;
+    uint64_t prev_id = 0;
     while(run_)
     {
       // mc_rtc::log::info("Trying to receive sensors");
@@ -126,13 +127,20 @@ UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
       {
         continue;
       }
+      if(prev_id + 1 != sensors_.id)
+      {
+        mc_rtc::log::warning("[MCUDPControl] Missed one or more sensors reading (previous id: {}, current id: {})",
+                             prev_id, sensors_.id);
+      }
       std::unique_lock<std::mutex> lock(sendControlMutex_);
       sendControlCV_.wait(lock, [this]() -> bool { return sendControl_; });
       {
         std::lock_guard<std::mutex> controlLock(controlMutex_);
+        controlData_.id = sensors_.id;
         controlClient.control().messages[robotName] = controlData_;
       }
       controlClient.send();
+      prev_id = sensors_.id;
       sendControl_ = false;
     }
   });
@@ -205,12 +213,12 @@ void UDPRobotControl::updateSensors()
     robot.forwardVelocity();
     robot.forwardAcceleration();
     /**
-    * As we have no guarantee that the robot is available before the controller has already been initialized, we
-    * provide a way to call a user-defined reset function that is called now that the robot is fully initialized.
-    * The user is expected to handle resetting the tasks according to the current robot state.
-    *
-    * Note that in case the robot starts in its halfsitting stance, this is not needed as the controller's robot state and
-    * the real robot match.
+     * As we have no guarantee that the robot is available before the controller has already been initialized, we
+     * provide a way to call a user-defined reset function that is called now that the robot is fully initialized.
+     * The user is expected to handle resetting the tasks according to the current robot state.
+     *
+     * Note that in case the robot starts in its halfsitting stance, this is not needed as the controller's robot state
+     * and the real robot match.
      */
     if(ctl.datastore().has("UDPPlugin::" + robotName_ + "::reset"))
     {
