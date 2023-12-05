@@ -21,7 +21,13 @@ void UDPPlugin::init(mc_control::MCGlobalController & gc, const mc_rtc::Configur
 {
   mc_rtc::log::info("Plugin config is:\n{}", config.dump(true, true));
 
-  UDPPluginSchema udpConfig = config;
+  config_.load(config);
+  if(gc.controller().config().has("UDPPlugin"))
+  {
+    config_.load(gc.controller().config()("UDPPlugin"));
+  }
+
+  UDPPluginSchema udpConfig = config_;
   if(udpConfig.robots.empty())
   {
     mc_rtc::log::warning("[UDPPlugin] No robot configured");
@@ -31,7 +37,6 @@ void UDPPlugin::init(mc_control::MCGlobalController & gc, const mc_rtc::Configur
   {
     udpRobotControls_.emplace_back(new UDPRobotControl(gc, robotName, robotUDPConfig));
   }
-  reset(gc);
 }
 
 void UDPPlugin::reset(mc_control::MCGlobalController & controller)

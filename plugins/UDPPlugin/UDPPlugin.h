@@ -27,6 +27,7 @@ struct UDPPlugin : public mc_control::GlobalPlugin
 
 protected:
   std::vector<std::shared_ptr<UDPRobotControl>> udpRobotControls_;
+  mc_rtc::Configuration config_;
 };
 
 } // namespace mc_plugin

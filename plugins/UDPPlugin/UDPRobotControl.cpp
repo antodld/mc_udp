@@ -158,6 +158,7 @@ void UDPRobotControl::updateSensors()
   gotSensors_ = false;
 
   auto & ctl = controller_.controller();
+  auto & robot = ctl.robot(robotName_);
 
   auto sensors = mc_udp::RobotSensors();
   {
@@ -194,6 +195,42 @@ void UDPRobotControl::updateSensors()
   controller_.setSensorPosition(robotName_, pos);
   controller_.setSensorAngularVelocity(robotName_, vel);
   controller_.setSensorLinearAcceleration(robotName_, acc);
+
+  // Floating base sensor
+  if(robot.hasBodySensor("FloatingBase"))
+  {
+    controller_.setSensorPositions(
+        robot.name(),
+        {{"FloatingBase", {sensors.floatingBasePos[0], sensors.floatingBasePos[1], sensors.floatingBasePos[2]}}});
+    Eigen::Vector3d fbRPY;
+    controller_.setSensorOrientations(
+        robot.name(),
+        {{"FloatingBase", Eigen::Quaterniond(mc_rbdyn::rpyToMat(
+                              {sensors.floatingBaseRPY[0], sensors.floatingBaseRPY[1], sensors.floatingBaseRPY[2]}))}});
+    controller_.setSensorAngularVelocities(
+        robot.name(),
+        {{"FloatingBase", {sensors.floatingBaseVel[0], sensors.floatingBaseVel[1], sensors.floatingBaseVel[2]}}});
+    controller_.setSensorLinearVelocities(
+        robot.name(),
+        {{"FloatingBase", {sensors.floatingBaseVel[3], sensors.floatingBaseVel[4], sensors.floatingBaseVel[5]}}});
+    controller_.setSensorLinearAccelerations(
+        robot.name(),
+        {{"FloatingBase", {sensors.floatingBaseAcc[0], sensors.floatingBaseAcc[1], sensors.floatingBaseAcc[2]}}});
+  }
+  std::unordered_map<std::string, std::string> fsensors;
+  fsensors["rfsensor"] = "RightFootForceSensor";
+  fsensors["lfsensor"] = "LeftFootForceSensor";
+  fsensors["rhsensor"] = "RightHandForceSensor";
+  fsensors["lhsensor"] = "LeftHandForceSensor";
+  std::map<std::string, std::map<std::string, sva::ForceVecd>> robot_wrenches;
+  auto & wrenches = robot_wrenches[robotName_];
+  for(const auto & fs : sensors.fsensors)
+  {
+    Eigen::Vector6d reading;
+    reading << fs.reading[3], fs.reading[4], fs.reading[5], fs.reading[0], fs.reading[1], fs.reading[2];
+    wrenches[fsensors.at(fs.name)] = sva::ForceVecd(reading);
+  }
+  controller_.setWrenches(robot.name(), wrenches);
 
   if(!controllerInit_)
   {
