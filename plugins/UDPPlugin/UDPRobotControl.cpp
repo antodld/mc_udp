@@ -67,6 +67,7 @@ UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
     const auto & port = config_.port;
     const auto & singleClient = config_.singleClient;
     bool clientsInitialized = false;
+    bool sensorsClientInitialized = false;
 
     mc_udp::Client sensorsClient(host, port);
     mc_rtc::log::info("Connecting UDP sensors client to {}:{}", host, port);
@@ -95,33 +96,42 @@ UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
             mc_rtc::log::error("- {}", m.first);
           }
           mc_rtc::log::error_and_throw<std::runtime_error>(
-              "[{}] Server is not providing sensors message for robot ({})", name_, robotName);
+              "[{}] Server is not providing sensors message for robot ({})", name_, robotModuleName_);
         }
-        const auto & sensors = sensorsMessages.at(robotName);
+        const auto & sensors = sensorsMessages.at(robotModuleName_);
         {
           std::lock_guard<std::mutex> sensorsLock(sensorsMutex_);
           sensors_ = sensors;
           gotSensors_ = true;
         }
-        if(!clientsInitialized)
+
+        if(!sensorsClientInitialized)
         {
-          mc_rtc::log::info("[{}] Waiting for controller initialization", name_);
-          std::unique_lock<std::mutex> lock(udpInitMutex_);
-          udpInitCV_.wait(lock, [this, &sensorsClient, &controlClient]() {
-            if(controllerInit_)
-            {
-              // Controller has now been initialized, we are ready to receive more data
-              sensorsClient.init();
-              if(!config_.singleClient)
-              {
-                controlClient.init();
-              }
-              mc_rtc::log::info("[{}] Clients initialized, start receiving data", name_);
-            }
-            return controllerInit_;
-          });
-          clientsInitialized = true;
+          sensorsClient.init(); 
+          if(!config_.singleClient)
+          {
+            controlClient.init();
+          }
+          sensorsClientInitialized = true;
         }
+
+        // if(!clientsInitialized && controllerInit_)
+        // {
+        //   // std::unique_lock<std::mutex> lock(udpInitMutex_);
+        //   // udpInitCV_.wait(lock, [this, &sensorsClient, &controlClient]() {
+        //     // if(controllerInit_)
+        //     // {
+        //       // Controller has now been initialized, we are ready to receive more data
+        //       if(!config_.singleClient)
+        //       {
+        //         controlClient.init();
+        //       }
+        //       mc_rtc::log::info("[{}] Clients initialized, start receiving data", name_);
+        //     // }
+        //     // return controllerInit_;
+        //   // });
+        //   clientsInitialized = true;
+        // }
       }
       if(!controllerInit_)
       {
@@ -154,129 +164,135 @@ UDPRobotControl::~UDPRobotControl()
 
 void UDPRobotControl::updateSensors()
 {
-  if(!gotSensors_) return;
-  gotSensors_ = false;
 
   auto & ctl = controller_.controller();
   auto & robot = ctl.robot(robotName_);
-
-  auto sensors = mc_udp::RobotSensors();
+  if(gotSensors_)
   {
-    std::lock_guard<std::mutex> sensorsLock(sensorsMutex_);
-    sensors = sensors_;
-  }
-  Eigen::Vector3d rpy;
-  rpy << sensors.orientation[0], sensors.orientation[1], sensors.orientation[2];
-  Eigen::Vector3d pos;
-  pos << sensors.position[0], sensors.position[1], sensors.position[2];
-  Eigen::Vector3d vel;
-  vel << sensors.angularVelocity[0], sensors.angularVelocity[1], sensors.angularVelocity[2];
-  Eigen::Vector3d acc;
-  acc << sensors.linearAcceleration[0], sensors.linearAcceleration[1], sensors.linearAcceleration[2];
-  // XXX inefficient
-  auto qIn = sensors.encoders;
-  auto alphaIn = sensors.encoderVelocities;
-  for(const auto & j : ignoredJoints)
-  {
-    qIn[j.first] = j.second;
-  }
-  if(config_.withEncoderVelocities)
-  {
-    for(const auto & j : ignoredVelocities)
+    auto sensors = mc_udp::RobotSensors();
     {
-      alphaIn[j.first] = j.second;
+      std::lock_guard<std::mutex> sensorsLock(sensorsMutex_);
+      sensors = sensors_;
     }
-  }
-
-  controller_.setEncoderValues(robotName_, sensors.encoders);
-  controller_.setEncoderVelocities(robotName_, sensors.encoderVelocities);
-  controller_.setJointTorques(robotName_, sensors.torques);
-  controller_.setSensorOrientation(robotName_, Eigen::Quaterniond(mc_rbdyn::rpyToMat(rpy)));
-  controller_.setSensorPosition(robotName_, pos);
-  controller_.setSensorAngularVelocity(robotName_, vel);
-  controller_.setSensorLinearAcceleration(robotName_, acc);
-
-  // Floating base sensor
-  if(robot.hasBodySensor("FloatingBase"))
-  {
-    controller_.setSensorPositions(
-        robot.name(),
-        {{"FloatingBase", {sensors.floatingBasePos[0], sensors.floatingBasePos[1], sensors.floatingBasePos[2]}}});
-    Eigen::Vector3d fbRPY;
-    controller_.setSensorOrientations(
-        robot.name(),
-        {{"FloatingBase", Eigen::Quaterniond(mc_rbdyn::rpyToMat(
-                              {sensors.floatingBaseRPY[0], sensors.floatingBaseRPY[1], sensors.floatingBaseRPY[2]}))}});
-    controller_.setSensorAngularVelocities(
-        robot.name(),
-        {{"FloatingBase", {sensors.floatingBaseVel[0], sensors.floatingBaseVel[1], sensors.floatingBaseVel[2]}}});
-    controller_.setSensorLinearVelocities(
-        robot.name(),
-        {{"FloatingBase", {sensors.floatingBaseVel[3], sensors.floatingBaseVel[4], sensors.floatingBaseVel[5]}}});
-    controller_.setSensorLinearAccelerations(
-        robot.name(),
-        {{"FloatingBase", {sensors.floatingBaseAcc[0], sensors.floatingBaseAcc[1], sensors.floatingBaseAcc[2]}}});
-  }
-  std::unordered_map<std::string, std::string> fsensors;
-  fsensors["rfsensor"] = "RightFootForceSensor";
-  fsensors["lfsensor"] = "LeftFootForceSensor";
-  fsensors["rhsensor"] = "RightHandForceSensor";
-  fsensors["lhsensor"] = "LeftHandForceSensor";
-  std::map<std::string, std::map<std::string, sva::ForceVecd>> robot_wrenches;
-  auto & wrenches = robot_wrenches[robotName_];
-  for(const auto & fs : sensors.fsensors)
-  {
-    Eigen::Vector6d reading;
-    reading << fs.reading[3], fs.reading[4], fs.reading[5], fs.reading[0], fs.reading[1], fs.reading[2];
-    wrenches[fsensors.at(fs.name)] = sva::ForceVecd(reading);
-  }
-  controller_.setWrenches(robot.name(), wrenches);
-
-  if(!controllerInit_)
-  {
-    mc_rtc::log::info("[{}] Initializing controller", name_);
-    auto & robot = ctl.robot(robotName_);
-    auto & q = robot.mbc().q;
-    for(size_t i = 0; i < qIn.size(); i++)
+    Eigen::Vector3d rpy;
+    rpy << sensors.orientation[0], sensors.orientation[1], sensors.orientation[2];
+    Eigen::Vector3d pos;
+    pos << sensors.position[0], sensors.position[1], sensors.position[2];
+    Eigen::Vector3d vel;
+    vel << sensors.angularVelocity[0], sensors.angularVelocity[1], sensors.angularVelocity[2];
+    Eigen::Vector3d acc;
+    acc << sensors.linearAcceleration[0], sensors.linearAcceleration[1], sensors.linearAcceleration[2];
+    // XXX inefficient
+    auto qIn = sensors.encoders;
+    auto alphaIn = sensors.encoderVelocities;
+    for(const auto & j : ignoredJoints)
     {
-      auto jIdx = robot.jointIndexInMBC(i);
-      if(jIdx != -1 && q[jIdx].size() == 1)
+      qIn[j.first] = j.second;
+    }
+    if(config_.withEncoderVelocities)
+    {
+      for(const auto & j : ignoredVelocities)
       {
-        q[jIdx][0] = qIn[i];
+        alphaIn[j.first] = j.second;
       }
     }
-    mc_rtc::log::warning("[{}] Resetting robot to initial position {}", name_, mc_rtc::io::to_string(qIn));
-    robot.forwardKinematics();
-    robot.forwardVelocity();
-    robot.forwardAcceleration();
-    /**
-     * As we have no guarantee that the robot is available before the controller has already been initialized, we
-     * provide a way to call a user-defined reset function that is called now that the robot is fully initialized.
-     * The user is expected to handle resetting the tasks according to the current robot state.
-     *
-     * Note that in case the robot starts in its halfsitting stance, this is not needed as the controller's robot state
-     * and the real robot match.
-     */
-    if(ctl.datastore().has("UDPPlugin::" + robotName_ + "::reset"))
+
+    controller_.setEncoderValues(robotName_, sensors.encoders);
+    controller_.setEncoderVelocities(robotName_, sensors.encoderVelocities);
+    controller_.setJointTorques(robotName_, sensors.torques);
+    controller_.setSensorOrientation(robotName_, Eigen::Quaterniond(mc_rbdyn::rpyToMat(rpy)));
+    controller_.setSensorPosition(robotName_, pos);
+    controller_.setSensorAngularVelocity(robotName_, vel);
+    controller_.setSensorLinearAcceleration(robotName_, acc);
+
+    // Floating base sensor
+    if(robot.hasBodySensor("FloatingBase"))
     {
-      ctl.datastore().call<void>("UDPPlugin::" + robotName_ + "::reset");
+      controller_.setSensorPositions(
+          robot.name(),
+          {{"FloatingBase", {sensors.floatingBasePos[0], sensors.floatingBasePos[1], sensors.floatingBasePos[2]}}});
+      Eigen::Vector3d fbRPY;
+      controller_.setSensorOrientations(
+          robot.name(),
+          {{"FloatingBase", Eigen::Quaterniond(mc_rbdyn::rpyToMat(
+                                {sensors.floatingBaseRPY[0], sensors.floatingBaseRPY[1], sensors.floatingBaseRPY[2]}))}});
+      controller_.setSensorAngularVelocities(
+          robot.name(),
+          {{"FloatingBase", {sensors.floatingBaseVel[0], sensors.floatingBaseVel[1], sensors.floatingBaseVel[2]}}});
+      controller_.setSensorLinearVelocities(
+          robot.name(),
+          {{"FloatingBase", {sensors.floatingBaseVel[3], sensors.floatingBaseVel[4], sensors.floatingBaseVel[5]}}});
+      controller_.setSensorLinearAccelerations(
+          robot.name(),
+          {{"FloatingBase", {sensors.floatingBaseAcc[0], sensors.floatingBaseAcc[1], sensors.floatingBaseAcc[2]}}});
     }
-    const auto & rjo = robot.module().ref_joint_order();
-    auto & cc = controlData_; // no need for lock here as we won't be trying to send control data yet
-    auto & qOut = cc.encoders;
-    auto & alphaOut = cc.encoderVelocities;
-    if(qOut.size() != rjo.size())
+    std::unordered_map<std::string, std::string> fsensors;
+    fsensors["rfsensor"] = "RightFootForceSensor";
+    fsensors["lfsensor"] = "LeftFootForceSensor";
+    fsensors["rhsensor"] = "RightHandForceSensor";
+    fsensors["lhsensor"] = "LeftHandForceSensor";
+    std::map<std::string, std::map<std::string, sva::ForceVecd>> robot_wrenches;
+    auto & wrenches = robot_wrenches[robotName_];
+    for(const auto & fs : sensors.fsensors)
     {
-      qOut.resize(rjo.size());
+      Eigen::Vector6d reading;
+      reading << fs.reading[3], fs.reading[4], fs.reading[5], fs.reading[0], fs.reading[1], fs.reading[2];
+      wrenches[fsensors.at(fs.name)] = sva::ForceVecd(reading);
     }
-    if(config_.withEncoderVelocities && alphaOut.size() != rjo.size())
+    controller_.setWrenches(robot.name(), wrenches);
+    
+    if(!controllerInit_)
     {
-      alphaOut.resize(rjo.size());
+      mc_rtc::log::info("[{}] Initializing controller", name_);
+      auto & robot = ctl.robot(robotName_);
+      auto & q = robot.mbc().q;
+      for(size_t i = 0; i < qIn.size(); i++)
+      {
+        auto jIdx = robot.jointIndexInMBC(i);
+        if(jIdx != -1 && q[jIdx].size() == 1)
+        {
+          q[jIdx][0] = qIn[i];
+        }
+      }
+      mc_rtc::log::warning("[{}] Resetting robot to initial position {}", name_, mc_rtc::io::to_string(qIn));
+      robot.forwardKinematics();
+      robot.forwardVelocity();
+      robot.forwardAcceleration();
+      /**
+       * As we have no guarantee that the robot is available before the controller has already been initialized, we
+       * provide a way to call a user-defined reset function that is called now that the robot is fully initialized.
+       * The user is expected to handle resetting the tasks according to the current robot state.
+       *
+       * Note that in case the robot starts in its halfsitting stance, this is not needed as the controller's robot state
+       * and the real robot match.
+       */
+      if(ctl.datastore().has("UDPPlugin::" + robotName_ + "::reset"))
+      {
+        ctl.datastore().call<void>("UDPPlugin::" + robotName_ + "::reset");
+        controllerInit_ = true;
+        udpInitCV_.notify_all();   
+
+      }
+
+      const auto & rjo = robot.module().ref_joint_order();
+      auto & cc = controlData_; // no need for lock here as we won't be trying to send control data yet
+      auto & qOut = cc.encoders;
+      auto & alphaOut = cc.encoderVelocities;
+      if(qOut.size() != rjo.size())
+      {
+        qOut.resize(rjo.size());
+      }
+      if(config_.withEncoderVelocities && alphaOut.size() != rjo.size())
+      {
+        alphaOut.resize(rjo.size());
+      }
+      // mc_rtc::log::info("[MCUDPControl] Init duration {}", init_dt.count());
+      
     }
-    // mc_rtc::log::info("[MCUDPControl] Init duration {}", init_dt.count());
-    controllerInit_ = true;
-    udpInitCV_.notify_all();
+
   }
+  gotSensors_ = false;
+
 }
 
 void UDPRobotControl::updateControl()
