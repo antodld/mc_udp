@@ -11,7 +11,7 @@ using duration_ms = mc_rtc::duration_ms;
 UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
                                  const std::string & robotName,
                                  const UDPRobotSchema & udpRobotConfig)
-: controller_(controller), config_(udpRobotConfig), robotName_(robotName), name_("UDPRobotControl::" + robotName)
+: controller_(controller), config_(udpRobotConfig), robotName_(robotName), name_("UDPRobotControl::" + robotName), robotModuleName_(controller.controller().robots().robot(robotName).module().name)
 {
   /**
    * Initialize ignored joint values and velocities
@@ -87,7 +87,7 @@ UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
       if(sensorsClient.recv())
       {
         auto & sensorsMessages = sensorsClient.sensors().messages;
-        if(!sensorsMessages.count(robotName))
+        if(!sensorsMessages.count(robotModuleName_))
         {
           mc_rtc::log::error("[{}] Server is providing sensors message for:", name_);
           for(const auto & m : sensorsMessages)
@@ -137,7 +137,7 @@ UDPRobotControl::UDPRobotControl(mc_control::MCGlobalController & controller,
       {
         std::lock_guard<std::mutex> controlLock(controlMutex_);
         controlData_.id = sensors_.id;
-        controlClient.control().messages[robotName] = controlData_;
+        controlClient.control().messages[robotModuleName_] = controlData_;
       }
       controlClient.send();
       prev_id = sensors_.id;

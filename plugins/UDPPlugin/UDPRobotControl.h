@@ -53,6 +53,7 @@ protected:
   mc_control::MCGlobalController & controller_; //< Global controller used to control this robot
   UDPRobotSchema config_; //< UDP Configuration for this robot
   std::string robotName_;
+  std::string robotModuleName_;
   std::string name_;
 
   bool controllerInit_ = false;
